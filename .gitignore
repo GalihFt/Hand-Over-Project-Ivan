@@ -1,5 +1,5 @@
 #Buat semua file yang berformat .xlsx atau format excel yang lain dimasukkan ke dalam gitignore agar menghindari kebocoran dataset ke publik
-*.xlsx
+!backend/*.xlsx
 *.csv
 .vscode/
 .env
