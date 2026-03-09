@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -272,6 +273,15 @@ DEFAULT_COST_MODEL: Dict[int, Dict[str, int]] = {
 
 route_cache: Dict[str, Tuple[float, float, str]] = {}
 geocode_cache: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
+geocode_source_cache: Dict[str, str] = {}
+
+COORDINATE_DB_FILENAMES = [
+    "final_data_koordinat.xlsx",
+    "data_master_koordinat.xlsx",
+    "data_koordinat.xlsx",
+]
+coordinate_lookup_db: Dict[str, Tuple[float, float]] = {}
+coordinate_lookup_db_file: Optional[Path] = None
 
 DEFAULT_DURASI_BONGKAR_JAM = 5.0
 DEFAULT_DURASI_MUAT_JAM = 5.0
@@ -339,87 +349,236 @@ def get_customer_time_profile(customer_id: str, cabang: str, tipe: str = "bongka
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 NOMINATIM_USER_AGENT = "roundtrip_mapping_optimization_v2"
 
+
+def _normalize_address_key(address: Any) -> str:
+    if address is None:
+        return ""
+    s = str(address).strip().upper()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _to_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    s = str(value).strip().replace(",", ".")
+    if not s or s.lower() in {"nan", "none"}:
+        return None
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _is_valid_lat_lon(lat: Optional[float], lon: Optional[float]) -> bool:
+    if lat is None or lon is None:
+        return False
+    return -90 <= lat <= 90 and -180 <= lon <= 180
+
+
+def _load_coordinate_lookup_db() -> None:
+    global coordinate_lookup_db, coordinate_lookup_db_file
+    base_dir = Path(__file__).parent
+
+    chosen_path: Optional[Path] = None
+    for filename in COORDINATE_DB_FILENAMES:
+        candidate = base_dir / filename
+        if candidate.exists():
+            chosen_path = candidate
+            break
+
+    if chosen_path is None:
+        print(
+            "Warning: coordinate master file not found. "
+            f"Tried: {', '.join(COORDINATE_DB_FILENAMES)}. "
+            "Fallback to external geocoding only."
+        )
+        coordinate_lookup_db = {}
+        coordinate_lookup_db_file = None
+        return
+
+    try:
+        db_df = pd.read_excel(chosen_path)
+    except Exception as e:
+        print(f"Warning: failed reading coordinate master '{chosen_path.name}': {e}")
+        coordinate_lookup_db = {}
+        coordinate_lookup_db_file = None
+        return
+
+    required_cols = {"ALAMAT", "LONGITUDE", "LATITUDE"}
+    if not required_cols.issubset(set(db_df.columns)):
+        print(
+            f"Warning: coordinate master '{chosen_path.name}' missing required columns "
+            f"{sorted(required_cols)}. Available: {list(db_df.columns)}. "
+            "Fallback to external geocoding only."
+        )
+        coordinate_lookup_db = {}
+        coordinate_lookup_db_file = None
+        return
+
+    loaded: Dict[str, Tuple[float, float]] = {}
+    for _, row in db_df.iterrows():
+        key = _normalize_address_key(row.get("ALAMAT"))
+        lat = _to_float(row.get("LATITUDE"))
+        lon = _to_float(row.get("LONGITUDE"))
+        if not key:
+            continue
+        if not _is_valid_lat_lon(lat, lon):
+            continue
+        loaded[key] = (lat, lon)
+
+    coordinate_lookup_db = loaded
+    coordinate_lookup_db_file = chosen_path
+    print(
+        f"Coordinate lookup DB loaded from '{chosen_path.name}': "
+        f"{len(coordinate_lookup_db)} alamat valid."
+    )
+
+
+_load_coordinate_lookup_db()
+
 def geocode_helper(
     address: str,
     max_retries: int = GEOCODE_MAX_RETRIES
 ) -> Tuple[Optional[float], Optional[float]]:
-    if address in geocode_cache:
-        return geocode_cache[address]
-    
+    lat, lon, _ = resolve_coordinates(address, max_retries=max_retries)
+    return lat, lon
+
+
+def _geocode_external(
+    address: str,
+    max_retries: int = GEOCODE_MAX_RETRIES
+) -> Tuple[Optional[float], Optional[float], str]:
+    if not address or not str(address).strip():
+        return (None, None, "not_found")
+
     for attempt in range(max_retries):
         try:
             query = str(address)
             if "indonesia" not in query.lower():
                 query += ", Indonesia"
-            
+
             response = requests.get(
                 NOMINATIM_URL,
                 params={"q": query, "format": "json", "limit": 1},
                 headers={"User-Agent": NOMINATIM_USER_AGENT},
                 timeout=GEOCODE_TIMEOUT
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
                 if data:
-                    result = (float(data[0]["lat"]), float(data[0]["lon"]))
-                else:
-                    result = (None, None)
-                geocode_cache[address] = result
-                return result
-            elif response.status_code == 429 or response.status_code == 509:
+                    lat = float(data[0]["lat"])
+                    lon = float(data[0]["lon"])
+                    geocode_cache[address] = (lat, lon)
+                    geocode_source_cache[address] = "geocoded"
+                    return (lat, lon, "geocoded")
+
+                geocode_cache[address] = (None, None)
+                geocode_source_cache[address] = "not_found"
+                return (None, None, "not_found")
+
+            if response.status_code in (429, 509):
                 print(f"Geocoding attempt {attempt + 1}/{max_retries} rate-limited for '{address}': HTTP {response.status_code}")
                 if attempt < max_retries - 1:
                     time.sleep(GEOCODE_RETRY_DELAY * (attempt + 1))
                 continue
-            else:
-                print(f"Geocoding attempt {attempt + 1}/{max_retries} failed for '{address}': HTTP {response.status_code}")
-                if attempt < max_retries - 1:
-                    time.sleep(GEOCODE_RETRY_DELAY * (attempt + 1))
-                continue
-                
+
+            print(f"Geocoding attempt {attempt + 1}/{max_retries} failed for '{address}': HTTP {response.status_code}")
+            if attempt < max_retries - 1:
+                time.sleep(GEOCODE_RETRY_DELAY * (attempt + 1))
+            continue
+
         except requests.exceptions.Timeout:
             print(f"Geocoding attempt {attempt + 1}/{max_retries} timed out for '{address}'")
             if attempt < max_retries - 1:
                 time.sleep(GEOCODE_RETRY_DELAY * (attempt + 1))
             continue
-            
+
         except Exception as e:
             print(f"Unexpected geocoding error for '{address}': {e}")
             break
-    
+
     geocode_cache[address] = (None, None)
-    return (None, None)
+    geocode_source_cache[address] = "not_found"
+    return (None, None, "not_found")
+
+
+def resolve_coordinates(
+    address: str,
+    input_lat: Optional[float] = None,
+    input_lon: Optional[float] = None,
+    max_retries: int = GEOCODE_MAX_RETRIES
+) -> Tuple[Optional[float], Optional[float], str]:
+    normalized_address = _normalize_address_key(address)
+
+    if _is_valid_lat_lon(input_lat, input_lon):
+        return input_lat, input_lon, "Data Base"
+
+    if normalized_address in coordinate_lookup_db:
+        lat, lon = coordinate_lookup_db[normalized_address]
+        geocode_cache[address] = (lat, lon)
+        geocode_source_cache[address] = "Data Base"
+        return lat, lon, "Data Base"
+
+    if address in geocode_cache:
+        return (
+            geocode_cache[address][0],
+            geocode_cache[address][1],
+            geocode_source_cache.get(address, "not_found"),
+        )
+
+    return _geocode_external(address, max_retries=max_retries)
+
 
 def geocode_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    if 'ALAMAT_LAT' in df.columns and df['ALAMAT_LAT'].notna().all():
+    if {'ALAMAT_LAT', 'ALAMAT_LONG'}.issubset(df.columns) and df['ALAMAT_LAT'].notna().all() and df['ALAMAT_LONG'].notna().all():
         return df
-    
+
     if 'ALAMAT' not in df.columns:
         return df
-    
-    df['SEARCH_QUERY'] = df['ALAMAT'].astype(str)
-    unique_addresses = df['SEARCH_QUERY'].unique()
-    
-    address_coords: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
-    total = len(unique_addresses)
-    
-    print(f"Geocoding {total} alamat unik...")
-    
-    for idx, addr in enumerate(unique_addresses):
-        print(f"  [{idx + 1}/{total}] Geocoding: {addr[:50]}...")
-        coords = geocode_helper(addr)
-        address_coords[addr] = coords
-        
-        sleep_time = 1.2 if coords != (None, None) else 0.5
-        time.sleep(sleep_time)
-    
-    df['ALAMAT_LAT'] = df['SEARCH_QUERY'].map(lambda x: address_coords.get(x, (None, None))[0])
-    df['ALAMAT_LONG'] = df['SEARCH_QUERY'].map(lambda x: address_coords.get(x, (None, None))[1])
-    
+
+    df = df.copy()
+    df['SEARCH_QUERY'] = df['ALAMAT'].astype(str).str.strip()
+    df['_INPUT_LAT'] = df['LATITUDE'].apply(_to_float) if 'LATITUDE' in df.columns else None
+    df['_INPUT_LON'] = df['LONGITUDE'].apply(_to_float) if 'LONGITUDE' in df.columns else None
+
+    unique_requests: List[Tuple[str, Optional[float], Optional[float]]] = list(
+        df[['SEARCH_QUERY', '_INPUT_LAT', '_INPUT_LON']]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    )
+
+    address_coords: Dict[Tuple[str, Optional[float], Optional[float]], Tuple[Optional[float], Optional[float], str]] = {}
+    total = len(unique_requests)
+    source_stats = {"Data Base": 0, "geocoded": 0, "not_found": 0}
+
+    print(f"Resolve koordinat {total} alamat unik...")
+
+    for idx, (addr, input_lat, input_lon) in enumerate(unique_requests):
+        print(f"  [{idx + 1}/{total}] Resolve: {addr[:50]}...")
+        lat, lon, match_level = resolve_coordinates(addr, input_lat=input_lat, input_lon=input_lon)
+        address_coords[(addr, input_lat, input_lon)] = (lat, lon, match_level)
+        source_stats[match_level] = source_stats.get(match_level, 0) + 1
+
+        if match_level == "geocoded":
+            time.sleep(1.2 if lat is not None and lon is not None else 0.5)
+
+    df['_COORD_KEY'] = list(zip(df['SEARCH_QUERY'], df['_INPUT_LAT'], df['_INPUT_LON']))
+    df['ALAMAT_LAT'] = df['_COORD_KEY'].map(lambda x: address_coords.get(x, (None, None, "not_found"))[0])
+    df['ALAMAT_LONG'] = df['_COORD_KEY'].map(lambda x: address_coords.get(x, (None, None, "not_found"))[1])
+    df['ALAMAT_MATCH_LEVEL'] = df['_COORD_KEY'].map(lambda x: address_coords.get(x, (None, None, "not_found"))[2])
+    df = df.drop(columns=['_COORD_KEY', '_INPUT_LAT', '_INPUT_LON'])
+
     success_count = df['ALAMAT_LAT'].notna().sum()
-    print(f"Geocoding selesai: {success_count}/{len(df)} alamat berhasil di-geocode")
-    
+    print(
+        "Resolve koordinat selesai: "
+        f"{success_count}/{len(df)} alamat berhasil | "
+        f"Data Base={source_stats.get('Data Base', 0)}, "
+        f"geocoded={source_stats.get('geocoded', 0)}, "
+        f"not_found={source_stats.get('not_found', 0)}"
+    )
+
     return df
 
 def _create_route_cache_key(lat1: float, lon1: float, lat2: float, lon2: float) -> str:
@@ -480,6 +639,12 @@ def normalize_cabang(cabang: Any) -> Optional[str]:
     
     cabang_str = str(cabang).strip().upper()
     return CABANG_ALIASES.get(cabang_str, cabang_str)
+
+
+def normalize_size_cont(size_cont: Any) -> str:
+    if size_cont is None:
+        return ""
+    return str(size_cont).upper().replace(" ", "").strip()
 
 def get_port_location(cabang: str) -> Dict[str, float]:
     return PORT_LOCATIONS.get(cabang, PORT_LOCATIONS['JKT'])
@@ -619,27 +784,36 @@ def process_optimization(
     df_dest: pd.DataFrame,
     df_origin: pd.DataFrame
 ) -> List[Dict[str, Any]]:
+    process_started_at = time.time()
+    print("[Optimize] Start process_optimization")
 
-    df_dest['ACT. LOAD DATE'] = pd.to_datetime(
-        df_dest['ACT. LOAD DATE'], 
+    if 'OPS DELIVERY TIME' not in df_dest.columns and 'ACT. LOAD DATE' in df_dest.columns:
+        df_dest = df_dest.rename(columns={'ACT. LOAD DATE': 'OPS DELIVERY TIME'})
+    if 'OPS DELIVERY TIME' not in df_origin.columns and 'ACT. LOAD DATE' in df_origin.columns:
+        df_origin = df_origin.rename(columns={'ACT. LOAD DATE': 'OPS DELIVERY TIME'})
+
+    df_dest['OPS DELIVERY TIME'] = pd.to_datetime(
+        df_dest['OPS DELIVERY TIME'],
         errors='coerce'
     )
-    df_origin['ACT. LOAD DATE'] = pd.to_datetime(
-        df_origin['ACT. LOAD DATE'], 
+    df_origin['OPS DELIVERY TIME'] = pd.to_datetime(
+        df_origin['OPS DELIVERY TIME'],
         errors='coerce'
     )
     
     if 'ALAMAT_LAT' not in df_dest.columns:
+        print("[Optimize] Resolving coordinates for destinasi...")
         df_dest = geocode_dataframe(df_dest)
     if 'ALAMAT_LAT' not in df_origin.columns:
+        print("[Optimize] Resolving coordinates for origin...")
         df_origin = geocode_dataframe(df_origin)
     
     df_dest = df_dest.dropna(
-        subset=['ALAMAT_LAT', 'ALAMAT_LONG', 'ACT. LOAD DATE']
+        subset=['ALAMAT_LAT', 'ALAMAT_LONG', 'OPS DELIVERY TIME']
     ).reset_index(drop=True)
     
     df_origin = df_origin.dropna(
-        subset=['ALAMAT_LAT', 'ALAMAT_LONG', 'ACT. LOAD DATE']
+        subset=['ALAMAT_LAT', 'ALAMAT_LONG', 'OPS DELIVERY TIME']
     ).reset_index(drop=True)
     
     num_dest = len(df_dest)
@@ -653,12 +827,31 @@ def process_optimization(
     match_details: Dict[Tuple[int, int], Dict[str, Any]] = {}
     
     print("Membangun cost matrix...")
+    matrix_started_at = time.time()
+    total_pairs_est = num_dest * num_origin
+    progress_interval = max(1, min(250, num_dest // 20 if num_dest > 0 else 1))
+    evaluated_pairs = 0
+    feasible_pairs = 0
+    route_calls_started = len(route_cache)
     
     for i, dest_row in df_dest.iterrows():
+        if i % progress_interval == 0:
+            elapsed = time.time() - matrix_started_at
+            avg_per_dest = elapsed / (i + 1) if i >= 0 else 0
+            remaining_dest = max(0, num_dest - (i + 1))
+            eta_sec = remaining_dest * avg_per_dest
+            pct = ((i + 1) / num_dest * 100.0) if num_dest > 0 else 100.0
+            print(
+                f"[Optimize][Matrix] {i + 1}/{num_dest} dest ({pct:.1f}%) | "
+                f"evaluated~{evaluated_pairs}/{total_pairs_est} pairs | "
+                f"feasible={feasible_pairs} | "
+                f"elapsed={elapsed:.1f}s eta={eta_sec:.1f}s"
+            )
+
         dest_id = dest_row['NO SOPT']
         dest_lat = float(dest_row['ALAMAT_LAT'])
         dest_lon = float(dest_row['ALAMAT_LONG'])
-        dest_load_time = dest_row['ACT. LOAD DATE']
+        dest_load_time = dest_row['OPS DELIVERY TIME']
         dest_cabang = normalize_cabang(dest_row['CABANG'])
         
         if dest_cabang is None:
@@ -678,7 +871,7 @@ def process_optimization(
         dist_port_to_dest = dist_port_to_dest if dist_port_to_dest else 99999
         time_port_to_dest = dist_port_to_dest / TRUCK_SPEED_FULL_KMH
 
-        # ACT. LOAD DATE + waktu tempuh port → customer bongkar
+        # OPS DELIVERY TIME + waktu tempuh port -> customer bongkar
         dest_arrival = dest_load_time + timedelta(hours=time_port_to_dest)
         
         dist_dest_to_port, _, _ = get_valhalla_route(
@@ -688,6 +881,7 @@ def process_optimization(
         dist_dest_to_port = dist_dest_to_port if dist_dest_to_port else 99999
         
         for j, orig_row in df_origin.iterrows():
+            evaluated_pairs += 1
             orig_cabang = normalize_cabang(orig_row['CABANG'])
 
             if dest_cabang != orig_cabang:
@@ -697,7 +891,9 @@ def process_optimization(
             if orig_service == 'STRIPPING':
                 continue
             
-            if dest_row['SIZE CONT'] != orig_row['SIZE CONT']:
+            dest_size_cont = normalize_size_cont(dest_row.get('SIZE CONT'))
+            orig_size_cont = normalize_size_cont(orig_row.get('SIZE CONT'))
+            if dest_size_cont != orig_size_cont:
                 continue
             
             if not is_grade_match(
@@ -724,8 +920,8 @@ def process_optimization(
             dist_port_to_orig = dist_port_to_orig if dist_port_to_orig else 99999
             time_port_to_orig = dist_port_to_orig / TRUCK_SPEED_FULL_KMH
 
-            # ACT. LOAD DATE + waktu tempuh port → customer muat
-            orig_arrival = orig_row['ACT. LOAD DATE'] + timedelta(hours=time_port_to_orig)
+            # OPS DELIVERY TIME + waktu tempuh port -> customer muat
+            orig_arrival = orig_row['OPS DELIVERY TIME'] + timedelta(hours=time_port_to_orig)
             
             dist_orig_to_port, _, _ = get_valhalla_route(
                 orig_lat, orig_lon,
@@ -773,7 +969,7 @@ def process_optimization(
             
             score = calculate_match_score(saving_km, shift_needed)
             
-            size_cont = dest_row['SIZE CONT']
+            size_cont = dest_size_cont
             size_int = 20 if '20' in str(size_cont) or '21' in str(size_cont) else 40
             
             cost_via_port = calculate_trucking_cost(dest_cabang, size_int, dist_via_port_full)
@@ -783,6 +979,7 @@ def process_optimization(
             saving_cost = cost_via_port - cost_triangulasi
             
             cost_matrix[i, j] = 10_000_000 - score
+            feasible_pairs += 1
             
             match_details[(i, j)] = {
                 'dest_id': dest_id,
@@ -808,6 +1005,7 @@ def process_optimization(
                 'durasi_bongkar_est': durasi_bongkar,
                 'durasi_muat_est': durasi_muat,
                 'selesai_bongkar': selesai_bongkar,
+                'est_tiba_muat': est_tiba_muat,
                 'dest_cust_id': dest_cust_id,
                 'orig_cust_id': orig_cust_id,
                 'dest_lat': dest_lat,
@@ -816,8 +1014,19 @@ def process_optimization(
                 'orig_lon': orig_lon
             }
 
+    matrix_elapsed = time.time() - matrix_started_at
+    route_calls_used = len(route_cache) - route_calls_started
+    print(
+        f"[Optimize][Matrix] Done in {matrix_elapsed:.1f}s | "
+        f"evaluated_pairs={evaluated_pairs} feasible_pairs={feasible_pairs} "
+        f"new_route_cache={route_calls_used}"
+    )
+
     print("Menjalankan Hungarian Algorithm untuk optimasi global...")
+    hungarian_started_at = time.time()
     row_indices, col_indices = linear_sum_assignment(cost_matrix)
+    hungarian_elapsed = time.time() - hungarian_started_at
+    print(f"[Optimize][Hungarian] Done in {hungarian_elapsed:.2f}s")
     
     results: List[Dict[str, Any]] = []
     
@@ -864,6 +1073,7 @@ def process_optimization(
             "DURASI_BONGKAR_EST": details['durasi_bongkar_est'],
             "DURASI_MUAT_EST": details['durasi_muat_est'],
             "SELESAI_BONGKAR": details['selesai_bongkar'].strftime('%Y-%m-%d %H:%M:%S'),
+            "EST_TIBA_MUAT": details['est_tiba_muat'].strftime('%Y-%m-%d %H:%M:%S'),
             "DEST_CUST_ID": details['dest_cust_id'],
             "ORIG_CUST_ID": details['orig_cust_id'],
             "DEST_TIME_PROFILE": get_customer_time_profile(
@@ -912,6 +1122,7 @@ def process_optimization(
     print(f"Selesai! Ditemukan {len(results)} rute optimal.")
     print(f"Total Penghematan Jarak: {total_saving_km:,.2f} km")
     print(f"Total Penghematan Biaya: Rp {total_saving_cost:,.0f}")
+    print(f"[Optimize] Total elapsed: {time.time() - process_started_at:.1f}s")
     
     return {
         "results": results,

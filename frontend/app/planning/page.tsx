@@ -33,7 +33,7 @@ export default function PlanningPage() {
         router.push('/');
     };
 
-    const handleSubmitData = async (destData: PlanningRow[], origData: PlanningRow[]) => {
+    const handleSubmitData = async (destData: PlanningRow[], origData: PlanningRow[], excludeWarnings: boolean) => {
         setLoading(true);
         try {
             const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -60,6 +60,7 @@ export default function PlanningPage() {
             const fd = new FormData();
             fd.append('file_dest', destBlob, 'planning_dest.xlsx');
             fd.append('file_orig', origBlob, 'planning_orig.xlsx');
+            fd.append('exclude_warnings', excludeWarnings ? 'true' : 'false');
 
             const res = await axios.post(`${apiUrl}/api/optimize`, fd);
 

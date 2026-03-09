@@ -4,8 +4,8 @@ import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
 import { PlanningRow, DataValidationResult, ValidationRowResult } from '@/types';
 import axios from 'axios';
 
-const REQUIRED_COLUMNS = ['NO SOPT', 'CABANG', 'ACT. LOAD DATE', 'CUST ID', 'ALAMAT', 'SIZE CONT', 'SERVICE TYPE', 'GRADE CONT'] as const;
-const ALL_COLUMNS = ['NO SOPT', 'CABANG', 'ACT. LOAD DATE', 'CUST ID', 'ALAMAT', 'SIZE CONT', 'SERVICE TYPE', 'GRADE CONT'] as const;
+const REQUIRED_COLUMNS = ['NO SOPT', 'SIZE CONT', 'GRADE CONT', 'OPS DELIVERY TIME', 'CUST ID', 'CABANG', 'ALAMAT', 'SERVICE TYPE'] as const;
+const ALL_COLUMNS = ['NO SOPT', 'NO CONTAINER', 'SIZE CONT', 'GRADE CONT', 'OPS DELIVERY TIME', 'VESVOY', 'BONGKAR FXD', 'CUST ID', 'CABANG', 'ALAMAT', 'LONGITUDE', 'LATITUDE', 'SERVICE TYPE'] as const;
 
 const PAGE_SIZE = 50;
 
@@ -72,6 +72,8 @@ interface DataPreviewEditorProps {
     onDestValidationChange?: (v: DataValidationResult) => void;
     onOrigValidationChange?: (v: DataValidationResult) => void;
     isValidated?: boolean;
+    excludeWarnings?: boolean;
+    onExcludeWarningsChange?: (value: boolean) => void;
 }
 
 type ActiveView = 'dest' | 'orig';
@@ -89,9 +91,18 @@ interface GeocodingCell {
 
 function createEmptyRow(): PlanningRow {
     return {
-        'NO SOPT': '', 'CABANG': '', 'ACT. LOAD DATE': '', 'CUST ID': '',
-        'ALAMAT': '', 'SIZE CONT': '', 'SERVICE TYPE': '', 'GRADE CONT': '',
+        'NO SOPT': '', 'NO CONTAINER': '', 'SIZE CONT': '', 'GRADE CONT': '', 'OPS DELIVERY TIME': '', 'VESVOY': '', 'BONGKAR FXD': '',
+        'CUST ID': '', 'CABANG': '', 'ALAMAT': '', 'LONGITUDE': '', 'LATITUDE': '', 'SERVICE TYPE': '',
     };
+}
+
+function parseCoordinate(value: string, kind: 'lat' | 'lon'): number | null {
+    const cleaned = value.trim().replace(',', '.');
+    if (!cleaned) return null;
+    const n = Number(cleaned);
+    if (!Number.isFinite(n)) return null;
+    if (kind === 'lat') return n >= -90 && n <= 90 ? n : null;
+    return n >= -180 && n <= 180 ? n : null;
 }
 
 function formatDateForInput(value: string): string {
@@ -145,7 +156,7 @@ const TableRow = memo(function TableRow({
             {ALL_COLUMNS.map(col => {
                 const isEditing = editingCell?.rowIndex === rowIdx && editingCell?.column === col;
                 const hasError = errorCellsSet.has(`${rowIdx}:${col}`);
-                const isDateCol = col === 'ACT. LOAD DATE';
+                const isDateCol = col === 'OPS DELIVERY TIME';
                 const isAddressCol = col === 'ALAMAT';
                 const cellValue = row[col] ?? '';
 
@@ -228,6 +239,8 @@ export default function DataPreviewEditor({
     destData, origData, onDestDataChange, onOrigDataChange, onSubmit, loading,
     destValidation, origValidation, onDestValidationChange, onOrigValidationChange,
     isValidated = false,
+    excludeWarnings = false,
+    onExcludeWarningsChange,
 }: DataPreviewEditorProps) {
     const [activeView, setActiveView] = useState<ActiveView>('dest');
     const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
@@ -275,9 +288,12 @@ export default function DataPreviewEditor({
     const destHasErrors = destErrorSet.size > 0 || validationCounts.dGeo > 0 || validationCounts.dDate > 0;
     const origHasErrors = origErrorSet.size > 0 || validationCounts.oGeo > 0 || validationCounts.oDate > 0;
 
-    const canSubmit = isValidated && !destHasErrors && !origHasErrors
-        && destData.length > 0 && origData.length > 0
-        && destErrorSet.size === 0 && origErrorSet.size === 0;
+    const hasData = destData.length > 0 && origData.length > 0;
+    const canSubmit = excludeWarnings
+        ? (isValidated && hasData)
+        : (isValidated && !destHasErrors && !origHasErrors
+            && hasData
+            && destErrorSet.size === 0 && origErrorSet.size === 0);
 
     const totalPages = Math.max(1, Math.ceil(currentData.length / PAGE_SIZE));
     const pageStart = currentPage * PAGE_SIZE;
@@ -301,7 +317,10 @@ export default function DataPreviewEditor({
         let summaryChanged = false;
         if (column in VALID_SETS) {
             const upperVal = newValue.trim().toUpperCase();
-            const isValid = !upperVal || VALID_SETS[column].has(upperVal);
+            const normalizedVal = column === 'SIZE CONT'
+                ? upperVal.replace(/\s+/g, '')
+                : upperVal;
+            const isValid = !normalizedVal || VALID_SETS[column].has(normalizedVal);
             const oldWarnings = rv.value_warnings.filter(w => w.column !== column);
             if (isValid) {
                 rv.value_warnings = oldWarnings;
@@ -315,7 +334,7 @@ export default function DataPreviewEditor({
             summaryChanged = true;
         }
 
-        if (column === 'ACT. LOAD DATE') {
+        if (column === 'OPS DELIVERY TIME') {
             const s = newValue.trim();
             if (!s) {
                 rv.datetime_parsed = null;
@@ -357,10 +376,41 @@ export default function DataPreviewEditor({
         updated[rowIndex] = { ...updated[rowIndex], [column]: value };
         onCurrentDataChange(updated);
 
-        if (isValidated && column !== 'ALAMAT') {
+        if (!isValidated) return;
+
+        if (column === 'LONGITUDE' || column === 'LATITUDE') {
+            const validation = activeView === 'dest' ? destValidation : origValidation;
+            const onChange = activeView === 'dest' ? onDestValidationChange : onOrigValidationChange;
+            if (!validation || !onChange || !validation.rows[rowIndex]) return;
+
+            const lonRaw = updated[rowIndex]?.['LONGITUDE'] ?? '';
+            const latRaw = updated[rowIndex]?.['LATITUDE'] ?? '';
+            const lonParsed = parseCoordinate(lonRaw, 'lon');
+            const latParsed = parseCoordinate(latRaw, 'lat');
+            const hasAnyManualCoord = lonRaw.trim() !== '' || latRaw.trim() !== '';
+
+            const updatedRows = [...validation.rows];
+            const rv = { ...updatedRows[rowIndex] };
+
+            if (hasAnyManualCoord) {
+                rv.geocode_lon = lonParsed;
+                rv.geocode_lat = latParsed;
+                rv.geocode_error = lonParsed !== null && latParsed !== null
+                    ? null
+                    : 'Longitude/Latitude manual tidak valid';
+            }
+
+            updatedRows[rowIndex] = rv;
+            const gs = updatedRows.filter(r => r.geocode_lat !== null && r.geocode_lon !== null && r.geocode_error === null).length;
+            const gf = updatedRows.filter(r => r.geocode_error !== null).length;
+            onChange({ ...validation, rows: updatedRows, summary: { ...validation.summary, geocode_success: gs, geocode_failed: gf } });
+            return;
+        }
+
+        if (column !== 'ALAMAT') {
             revalidateRowLocally(rowIndex, column, value);
         }
-    }, [currentData, onCurrentDataChange, isValidated, revalidateRowLocally]);
+    }, [currentData, onCurrentDataChange, isValidated, revalidateRowLocally, activeView, destValidation, origValidation, onDestValidationChange, onOrigValidationChange]);
 
     const handleAddressBlur = useCallback(async (rowIndex: number, newAddress: string) => {
         setEditingCell(null);
@@ -378,9 +428,18 @@ export default function DataPreviewEditor({
                 if (updatedRows[rowIndex]) {
                     updatedRows[rowIndex] = { ...updatedRows[rowIndex], geocode_lat: lat, geocode_lon: lon, geocode_error: lat !== null ? null : (error || 'Tidak ditemukan') };
                 }
-                const gs = updatedRows.filter(r => r.geocode_lat !== null).length;
+                const gs = updatedRows.filter(r => r.geocode_lat !== null && r.geocode_lon !== null && r.geocode_error === null).length;
                 const gf = updatedRows.filter(r => r.geocode_error !== null).length;
                 onChange({ ...validation, rows: updatedRows, summary: { ...validation.summary, geocode_success: gs, geocode_failed: gf } });
+            }
+            const updatedData = [...currentData];
+            if (updatedData[rowIndex]) {
+                updatedData[rowIndex] = {
+                    ...updatedData[rowIndex],
+                    'LATITUDE': lat !== null ? String(lat) : '',
+                    'LONGITUDE': lon !== null ? String(lon) : '',
+                };
+                onCurrentDataChange(updatedData);
             }
             if (lat !== null) {
                 setGeocodingCells(prev => { const n = new Map(prev); n.set(cellKey, { rowIndex, status: 'success', message: `${lat.toFixed(4)}, ${lon.toFixed(4)}` }); return n; });
@@ -391,7 +450,7 @@ export default function DataPreviewEditor({
         } catch {
             setGeocodingCells(prev => { const n = new Map(prev); n.set(cellKey, { rowIndex, status: 'error', message: 'Gagal menghubungi server' }); return n; });
         }
-    }, [activeView, destValidation, origValidation, onDestValidationChange, onOrigValidationChange]);
+    }, [activeView, destValidation, origValidation, onDestValidationChange, onOrigValidationChange, currentData, onCurrentDataChange]);
 
     const handleCellBlur = useCallback(() => { setEditingCell(null); }, []);
     const handleAddRow = useCallback(() => { onCurrentDataChange([...currentData, createEmptyRow()]); }, [currentData, onCurrentDataChange]);
@@ -574,6 +633,17 @@ export default function DataPreviewEditor({
             </div>
 
             <div className="relative">
+                {isValidated && (
+                    <label className="mb-3 flex items-center gap-2 text-sm text-slate-600">
+                        <input
+                            type="checkbox"
+                            checked={excludeWarnings}
+                            onChange={(e) => onExcludeWarningsChange?.(e.target.checked)}
+                            className="rounded border-slate-300"
+                        />
+                        Exclude data yang masih warning/error sebelum mapping
+                    </label>
+                )}
                 <button onClick={onSubmit} disabled={!canSubmit || loading}
                     className={`w-full py-4 rounded-xl font-bold text-white text-lg transition-all shadow-lg ${!canSubmit || loading ? 'bg-slate-400 cursor-not-allowed' : 'bg-linear-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 shadow-amber-500/30'}`}>
                     {loading ? (
@@ -585,9 +655,10 @@ export default function DataPreviewEditor({
                 </button>
                 {!canSubmit && !loading && isValidated && (
                     <div className="mt-2 text-center text-xs text-red-600">
-                        {validationCounts.totalGeo > 0 && <p>Perbaiki {validationCounts.totalGeo} alamat yang gagal geocoding</p>}
-                        {validationCounts.totalDate > 0 && <p>Perbaiki {validationCounts.totalDate} format tanggal yang tidak valid</p>}
-                        {(destErrorSet.size > 0 || origErrorSet.size > 0) && <p>Lengkapi semua kolom wajib yang kosong</p>}
+                        {!excludeWarnings && validationCounts.totalGeo > 0 && <p>Perbaiki {validationCounts.totalGeo} alamat yang gagal geocoding</p>}
+                        {!excludeWarnings && validationCounts.totalDate > 0 && <p>Perbaiki {validationCounts.totalDate} format tanggal yang tidak valid</p>}
+                        {!excludeWarnings && (destErrorSet.size > 0 || origErrorSet.size > 0) && <p>Lengkapi semua kolom wajib yang kosong</p>}
+                        {excludeWarnings && !hasData && <p>Tambahkan data bongkar dan muat terlebih dahulu</p>}
                     </div>
                 )}
                 {!isValidated && destData.length > 0 && origData.length > 0 && (

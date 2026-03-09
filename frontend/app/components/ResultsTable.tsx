@@ -1,7 +1,8 @@
 "use client";
 
+import { useMemo, useState } from 'react';
 import { OptimizationResult, CabangStats, AppMode } from '@/types';
-import { formatNumber } from '@/utils/formatters';
+import { formatNumber, formatRupiah } from '@/utils/formatters';
 import StatusBadge from './StatusBadge';
 import CabangFilter from './CabangFilter';
 
@@ -28,6 +29,89 @@ export default function ResultsTable({
   onBackToUpload,
   appMode,
 }: ResultsTableProps) {
+  type SortKey =
+    | 'DEST_ID'
+    | 'ORIG_ID'
+    | 'CABANG'
+    | 'WAKTU_BONGKAR_ASLI'
+    | 'WAKTU_MUAT_ASLI'
+    | 'SAVING_KM'
+    | 'SAVING_COST'
+    | 'GAP_WAKTU_ASLI'
+    | 'SCORE_FINAL';
+
+  const [sortKey, setSortKey] = useState<SortKey>('SCORE_FINAL');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [selectedStatus, setSelectedStatus] = useState<string>('all');
+  const [selectedKategori, setSelectedKategori] = useState<string>('all');
+
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'));
+      return;
+    }
+    setSortKey(key);
+    setSortDir(key === 'SCORE_FINAL' ? 'desc' : 'asc');
+  };
+
+  const statusOptions = useMemo(
+    () => Array.from(new Set(filteredResults.map(r => r.STATUS).filter(Boolean))).sort(),
+    [filteredResults]
+  );
+
+  const kategoriOptions = useMemo(
+    () => Array.from(new Set(filteredResults.map(r => r.KATEGORI_POOL).filter(Boolean))).sort(),
+    [filteredResults]
+  );
+
+  const filteredByStatusKategori = useMemo(() => {
+    return filteredResults.filter((row) => {
+      const statusOk = selectedStatus === 'all' || row.STATUS === selectedStatus;
+      const kategoriOk = selectedKategori === 'all' || row.KATEGORI_POOL === selectedKategori;
+      return statusOk && kategoriOk;
+    });
+  }, [filteredResults, selectedStatus, selectedKategori]);
+
+  const sortedResults = useMemo(() => {
+    const rows = [...filteredByStatusKategori];
+    rows.sort((a, b) => {
+      const dir = sortDir === 'asc' ? 1 : -1;
+
+      const numericKeys: SortKey[] = ['SAVING_KM', 'SAVING_COST', 'GAP_WAKTU_ASLI', 'SCORE_FINAL'];
+      if (numericKeys.includes(sortKey)) {
+        const av = Number(a[sortKey] ?? 0);
+        const bv = Number(b[sortKey] ?? 0);
+        return (av - bv) * dir;
+      }
+
+      if (sortKey === 'WAKTU_BONGKAR_ASLI' || sortKey === 'WAKTU_MUAT_ASLI') {
+        const at = new Date(String(a[sortKey] ?? '')).getTime() || 0;
+        const bt = new Date(String(b[sortKey] ?? '')).getTime() || 0;
+        return (at - bt) * dir;
+      }
+
+      const av = String(a[sortKey] ?? '').toUpperCase();
+      const bv = String(b[sortKey] ?? '').toUpperCase();
+      return av.localeCompare(bv) * dir;
+    });
+    return rows;
+  }, [filteredByStatusKategori, sortDir, sortKey]);
+
+  const SortableTh = ({ label, keyName, align = '' }: { label: string; keyName: SortKey; align?: string }) => (
+    <th className={`px-6 py-4 ${align}`}>
+      <button
+        type="button"
+        onClick={() => handleSort(keyName)}
+        className="inline-flex items-center gap-1 hover:text-slate-700 transition-colors"
+      >
+        <span>{label}</span>
+        <span className="text-[10px]">
+          {sortKey === keyName ? (sortDir === 'asc' ? '▲' : '▼') : '↕'}
+        </span>
+      </button>
+    </th>
+  );
+
   const currentStats = (() => {
     if (selectedCabang === 'all') {
       return cabangStats.reduce(
@@ -150,6 +234,37 @@ export default function ResultsTable({
       )}
 
       <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+        <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center gap-3 text-xs">
+          <span className="text-slate-500 font-semibold">Filter Status & Kategori:</span>
+          <select
+            value={selectedStatus}
+            onChange={(e) => setSelectedStatus(e.target.value)}
+            className="px-2 py-1 rounded border border-slate-300 text-slate-700 bg-white"
+          >
+            <option value="all">Semua Status</option>
+            {statusOptions.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+          <select
+            value={selectedKategori}
+            onChange={(e) => setSelectedKategori(e.target.value)}
+            className="px-2 py-1 rounded border border-slate-300 text-slate-700 bg-white"
+          >
+            <option value="all">Semua Kategori</option>
+            {kategoriOptions.map((k) => (
+              <option key={k} value={k}>{k}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={() => { setSelectedStatus('all'); setSelectedKategori('all'); }}
+            className="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-100 transition-colors"
+          >
+            Reset
+          </button>
+          <span className="text-slate-400">Menampilkan {sortedResults.length} dari {filteredResults.length} baris</span>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm text-left whitespace-nowrap">
             <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
@@ -158,15 +273,19 @@ export default function ResultsTable({
                 <th className="px-6 py-4">Cust ID Dest</th>
                 <th className="px-6 py-4">ID SOPT Origin</th>
                 <th className="px-6 py-4">Cust ID Orig</th>
-                <th className="px-6 py-4">Cabang</th>
-                <th className="px-6 py-4">Waktu Bongkar</th>
-                <th className="px-6 py-4">Waktu Muat</th>
+                <SortableTh label="Cabang" keyName="CABANG" />
+                <SortableTh label="Waktu Bongkar" keyName="WAKTU_BONGKAR_ASLI" />
+                <SortableTh label="Waktu Muat" keyName="WAKTU_MUAT_ASLI" />
                 <th className="px-6 py-4">Status & Kategori</th>
+                <SortableTh label="Saving KM" keyName="SAVING_KM" />
+                <SortableTh label="Saving Cost" keyName="SAVING_COST" />
+                <SortableTh label="Gap Waktu" keyName="GAP_WAKTU_ASLI" />
+                <SortableTh label="Score Final" keyName="SCORE_FINAL" />
                 <th className="px-6 py-4 text-center">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredResults.map((row, idx) => (
+              {sortedResults.map((row, idx) => (
                 <tr key={idx} className="hover:bg-blue-50/50 transition-colors">
                   <td className="px-6 py-4">
                     <div className="font-bold text-slate-800">{row.DEST_ID}</div>
@@ -195,6 +314,10 @@ export default function ResultsTable({
                     <StatusBadge status={row.KATEGORI_POOL || row.STATUS} />
                     <div className="text-xs text-slate-400 mt-1 font-mono">{row.STATUS}</div>
                   </td>
+                  <td className="px-6 py-4 text-slate-700 font-mono">{formatNumber(row.SAVING_KM)} km</td>
+                  <td className="px-6 py-4 text-slate-700 font-mono">{formatRupiah(row.SAVING_COST)}</td>
+                  <td className="px-6 py-4 text-slate-700 font-mono">{formatNumber(row.GAP_WAKTU_ASLI)} jam</td>
+                  <td className="px-6 py-4 text-slate-700 font-mono">{formatNumber(row.SCORE_FINAL)}</td>
                   <td className="px-6 py-4 text-center">
                     <button
                       onClick={() => onViewDetail(row)}

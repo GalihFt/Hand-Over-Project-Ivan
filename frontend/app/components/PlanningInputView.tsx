@@ -6,12 +6,12 @@ import axios from 'axios';
 import { PlanningRow, DataValidationResult, FullValidationResult } from '@/types';
 import DataPreviewEditor from './DataPreviewEditor';
 
-const REQUIRED_COLUMNS = ['NO SOPT', 'CABANG', 'ACT. LOAD DATE', 'CUST ID', 'ALAMAT', 'SIZE CONT', 'SERVICE TYPE', 'GRADE CONT'];
+const REQUIRED_COLUMNS = ['NO SOPT', 'SIZE CONT', 'GRADE CONT', 'OPS DELIVERY TIME', 'CUST ID', 'CABANG', 'ALAMAT', 'SERVICE TYPE'];
 
 type InputTab = 'upload' | 'paste' | 'manual';
 
 interface PlanningInputViewProps {
-    onSubmitData: (destData: PlanningRow[], origData: PlanningRow[]) => void;
+    onSubmitData: (destData: PlanningRow[], origData: PlanningRow[], excludeWarnings: boolean) => void;
     onBackToLanding: () => void;
     loading: boolean;
 }
@@ -22,16 +22,33 @@ function normalizeColumnName(raw: string): string {
         'NOMOR SOPT': 'NO SOPT',
         'NO_SOPT': 'NO SOPT',
         'NOSOPT': 'NO SOPT',
+        'NO CONTAINER': 'NO CONTAINER',
+        'NO_CONTAINER': 'NO CONTAINER',
+        'CONTAINER NO': 'NO CONTAINER',
+        'CONTAINER_NO': 'NO CONTAINER',
+        'VES VOY': 'VESVOY',
+        'VES_VOY': 'VESVOY',
+        'BONGKAR_FXD': 'BONGKAR FXD',
+        'BONGKAR FIXED': 'BONGKAR FXD',
         'CUSTOMER ID': 'CUST ID',
         'CUSTOMER_ID': 'CUST ID',
         'CUSTID': 'CUST ID',
         'ADDRESS': 'ALAMAT',
+        'LONG': 'LONGITUDE',
+        'LON': 'LONGITUDE',
+        'LNG': 'LONGITUDE',
+        'LONGITUDE': 'LONGITUDE',
+        'LAT': 'LATITUDE',
+        'LATITUDE': 'LATITUDE',
         'SIZE': 'SIZE CONT',
         'SIZE_CONT': 'SIZE CONT',
-        'ACT LOAD DATE': 'ACT. LOAD DATE',
-        'ACT_LOAD_DATE': 'ACT. LOAD DATE',
-        'ACTUAL LOAD DATE': 'ACT. LOAD DATE',
-        'LOAD DATE': 'ACT. LOAD DATE',
+        'ACT LOAD DATE': 'OPS DELIVERY TIME',
+        'ACT_LOAD_DATE': 'OPS DELIVERY TIME',
+        'ACTUAL LOAD DATE': 'OPS DELIVERY TIME',
+        'LOAD DATE': 'OPS DELIVERY TIME',
+        'ACT. LOAD DATE': 'OPS DELIVERY TIME',
+        'OPS DELIVERY TIME': 'OPS DELIVERY TIME',
+        'OPS_DELIVERY_TIME': 'OPS DELIVERY TIME',
         'SERVICE_TYPE': 'SERVICE TYPE',
         'SERVICETYPE': 'SERVICE TYPE',
         'GRADE_CONT': 'GRADE CONT',
@@ -102,18 +119,23 @@ function convertToRows(records: Record<string, unknown>[]): PlanningRow[] {
     return records.map((rec) => {
         const row: PlanningRow = {
             'NO SOPT': '',
+            'NO CONTAINER': '',
+            'SIZE CONT': '',
+            'GRADE CONT': '',
             'CABANG': '',
-            'ACT. LOAD DATE': '',
+            'OPS DELIVERY TIME': '',
+            'VESVOY': '',
+            'BONGKAR FXD': '',
             'CUST ID': '',
             'ALAMAT': '',
-            'SIZE CONT': '',
+            'LONGITUDE': '',
+            'LATITUDE': '',
             'SERVICE TYPE': '',
-            'GRADE CONT': '',
         };
 
         for (const [rawKey, rawValue] of Object.entries(rec)) {
             const col = normalizeColumnName(rawKey);
-            const value = col === 'ACT. LOAD DATE'
+            const value = col === 'OPS DELIVERY TIME'
                 ? parseExcelDate(rawValue)
                 : String(rawValue ?? '').trim();
             row[col] = value;
@@ -133,18 +155,23 @@ function parseTSV(text: string): PlanningRow[] {
         const values = line.split('\t');
         const row: PlanningRow = {
             'NO SOPT': '',
+            'NO CONTAINER': '',
+            'SIZE CONT': '',
+            'GRADE CONT': '',
             'CABANG': '',
-            'ACT. LOAD DATE': '',
+            'OPS DELIVERY TIME': '',
+            'VESVOY': '',
+            'BONGKAR FXD': '',
             'CUST ID': '',
             'ALAMAT': '',
-            'SIZE CONT': '',
+            'LONGITUDE': '',
+            'LATITUDE': '',
             'SERVICE TYPE': '',
-            'GRADE CONT': '',
         };
 
         headers.forEach((header, idx) => {
             const value = values[idx]?.trim() ?? '';
-            row[header] = header === 'ACT. LOAD DATE' ? parseExcelDate(value) : value;
+            row[header] = header === 'OPS DELIVERY TIME' ? parseExcelDate(value) : value;
         });
 
         return row;
@@ -180,10 +207,11 @@ export default function PlanningInputView({
     const [origValidation, setOrigValidation] = useState<DataValidationResult | null>(null);
     const [isValidating, setIsValidating] = useState(false);
     const [isValidated, setIsValidated] = useState(false);
+    const [excludeWarnings, setExcludeWarnings] = useState(false);
 
     const handleSubmit = useCallback(() => {
-        onSubmitData(destData, origData);
-    }, [destData, origData, onSubmitData]);
+        onSubmitData(destData, origData, excludeWarnings);
+    }, [destData, origData, onSubmitData, excludeWarnings]);
 
     const validateParsedData = (rows: PlanningRow[], label: string): string | null => {
         if (rows.length === 0) return `Data ${label} kosong.`;
@@ -227,6 +255,27 @@ export default function PlanningInputView({
 
             setDestValidation(res.data.dest);
             setOrigValidation(res.data.orig);
+
+            const fillCoordinates = (rows: PlanningRow[], validation: DataValidationResult): PlanningRow[] =>
+                rows.map((row, idx) => {
+                    const vr = validation.rows[idx];
+                    if (!vr) return row;
+
+                    const next = { ...row };
+                    const lonRaw = (next['LONGITUDE'] ?? '').trim();
+                    const latRaw = (next['LATITUDE'] ?? '').trim();
+
+                    if (!lonRaw && vr.geocode_lon !== null) {
+                        next['LONGITUDE'] = String(vr.geocode_lon);
+                    }
+                    if (!latRaw && vr.geocode_lat !== null) {
+                        next['LATITUDE'] = String(vr.geocode_lat);
+                    }
+                    return next;
+                });
+
+            setDestData(prev => fillCoordinates(prev, res.data.dest));
+            setOrigData(prev => fillCoordinates(prev, res.data.orig));
             setIsValidated(true);
         } catch (err) {
             if (axios.isAxiosError(err)) {
@@ -419,6 +468,8 @@ export default function PlanningInputView({
                     onDestValidationChange={setDestValidation}
                     onOrigValidationChange={setOrigValidation}
                     isValidated={isValidated}
+                    excludeWarnings={excludeWarnings}
+                    onExcludeWarningsChange={setExcludeWarnings}
                 />
             </div>
         );
@@ -539,7 +590,7 @@ export default function PlanningInputView({
                             <textarea
                                 value={pasteDest}
                                 onChange={(e) => setPasteDest(e.target.value)}
-                                placeholder={"NO SOPT\tCABANG\tACT. LOAD DATE\tCUST ID\tALAMAT\tSIZE CONT\tSERVICE TYPE\tGRADE CONT\nS001\tMAKASSAR\t2026-02-25 10:00\tABC001\tJl. Example\t20\tINTERCHANGE\tGRADE A"}
+                                placeholder={"NO SOPT\tNO CONTAINER\tSIZE CONT\tGRADE CONT\tOPS DELIVERY TIME\tVESVOY\tBONGKAR FXD\tCUST ID\tCABANG\tALAMAT\tLONGITUDE\tLATITUDE\tSERVICE TYPE\nS001\tCONT001\t20DC\tA\t2026-02-25 10:00\tVES001\t\tABC001\tMAKASSAR\tJl. Example\t\t\tINTERCHANGE"}
                                 className="w-full h-40 p-3 border border-slate-200 rounded-lg text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-violet-300 focus:border-violet-400"
                             />
                             {pasteDest && (
@@ -559,7 +610,7 @@ export default function PlanningInputView({
                             <textarea
                                 value={pasteOrig}
                                 onChange={(e) => setPasteOrig(e.target.value)}
-                                placeholder={"NO SOPT\tCABANG\tACT. LOAD DATE\tCUST ID\tALAMAT\tSIZE CONT\tSERVICE TYPE\tGRADE CONT\nS011\tMAKASSAR\t2026-02-27 08:00\tDEF002\tJl. Sample\t40\tINTERCHANGE\tGRADE A"}
+                                placeholder={"NO SOPT\tNO CONTAINER\tSIZE CONT\tGRADE CONT\tOPS DELIVERY TIME\tVESVOY\tBONGKAR FXD\tCUST ID\tCABANG\tALAMAT\tLONGITUDE\tLATITUDE\tSERVICE TYPE\nS011\tCONT011\t40HC\tA\t2026-02-27 08:00\tVES002\t\tDEF002\tMAKASSAR\tJl. Sample\t\t\tINTERCHANGE"}
                                 className="w-full h-40 p-3 border border-slate-200 rounded-lg text-sm font-mono resize-y focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400"
                             />
                             {pasteOrig && (

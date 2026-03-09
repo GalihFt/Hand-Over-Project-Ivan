@@ -70,13 +70,18 @@ export type AppMode = 'mapping' | 'simulation' | 'planning';
 
 export interface PlanningRow {
   'NO SOPT': string;
+  'NO CONTAINER': string;
+  'SIZE CONT': string;
+  'GRADE CONT': string;
   'CABANG': string;
-  'ACT. LOAD DATE': string;
+  'OPS DELIVERY TIME': string;
+  'VESVOY': string;
+  'BONGKAR FXD': string;
   'CUST ID': string;
   'ALAMAT': string;
-  'SIZE CONT': string;
+  'LONGITUDE': string;
+  'LATITUDE': string;
   'SERVICE TYPE': string;
-  'GRADE CONT': string;
   [key: string]: string | undefined;
 }
 
