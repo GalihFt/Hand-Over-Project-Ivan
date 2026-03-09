@@ -84,8 +84,8 @@ Aplikasi ini merupakan web yang mengoptimasi rute trucking dengan memetakan kegi
 
 ### Backend
 
-| Technology         | Purpose                                     |
-| ------------------ | ------------------------------------------- |
+| Technology               | Purpose                                     |
+| ------------------------ | ------------------------------------------- |
 | **FastAPI**        | REST API Framework                          |
 | **Python 3.10+**   | Core Language                               |
 | **Pandas & NumPy** | Data Processing                             |
@@ -95,8 +95,8 @@ Aplikasi ini merupakan web yang mengoptimasi rute trucking dengan memetakan kegi
 
 ### Frontend
 
-| Technology       | Purpose                      |
-| ---------------- | ---------------------------- |
+| Technology             | Purpose                      |
+| ---------------------- | ---------------------------- |
 | **Next.js 16**   | React Framework (App Router) |
 | **TypeScript**   | Type Safety                  |
 | **Tailwind CSS** | Styling                      |
@@ -118,7 +118,7 @@ Aplikasi ini merupakan web yang mengoptimasi rute trucking dengan memetakan kegi
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/mlikiwe/mapping_by_design.git
+git clone https://github.com/GalihFt/Hand-Over-Project-Ivan
 cd mapping_by_design
 ```
 
@@ -209,8 +209,8 @@ npm run dev
 
 **Required Columns:**
 
-| Column              | Description                             |
-| ------------------- | --------------------------------------- |
+| Column                | Description                             |
+| --------------------- | --------------------------------------- |
 | `NO SOPT`           | ID unik shipment                        |
 | `ALAMAT`            | Alamat lengkap untuk geocoding          |
 | `CABANG`            | Kode cabang (SBY, JKT, SMG, MKS, etc.)  |
@@ -329,8 +329,8 @@ mapping_by_design/
 
 ### Environment Variables (Backend)
 
-| Variable       | Default                       | Description           |
-| -------------- | ----------------------------- | --------------------- |
+| Variable         | Default                         | Description           |
+| ---------------- | ------------------------------- | --------------------- |
 | `VALHALLA_URL` | `http://localhost:8002/route` | Valhalla API endpoint |
 
 ### Constraint Parameters (logic.py)
@@ -368,8 +368,8 @@ MAX_MAJUKAN_MUAT = 12        # Maks maju jadwal muat (jam)
 
 ## 🌐 Deployment
 
-| Item                   | Link                                                                                                 |
-| ---------------------- | ---------------------------------------------------------------------------------------------------- |
+| Item                         | Link                                                                                              |
+| ---------------------------- | ------------------------------------------------------------------------------------------------- |
 | **URL Website**        | [https://mapping-by-design.vercel.app/](https://mapping-by-design.vercel.app/)                       |
 | **Source Code GitHub** | [https://github.com/mlikiwe/mapping_by_design](https://github.com/mlikiwe/mapping_by_design)         |
 | **Data Testing**       | [Google Drive](https://drive.google.com/drive/folders/13gIlUDpNNBPpIPec-GVL8ye9MstrCzGB?usp=sharing) |
