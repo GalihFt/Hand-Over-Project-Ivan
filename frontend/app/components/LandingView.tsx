@@ -11,7 +11,7 @@ export default function LandingView({ onSelectMode }: LandingViewProps) {
     <div className="max-w-4xl mx-auto mt-16 animate-in fade-in slide-in-from-bottom-8">
       <div className="text-center mb-12">
         <h2 className="text-4xl font-bold text-slate-800 mb-4">
-          Sistem Optimasi<span className="text-blue-600">Roundtrip</span>
+          Sistem Optimasi<span className="text-blue-600"> Roundtrip</span>
         </h2>
       </div>
 
